@@ -631,7 +631,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "member_auction"
+name = "membership_auction"
 version = "0.1.0"
 dependencies = [
  "anchor-lang",

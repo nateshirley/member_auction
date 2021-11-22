@@ -1,5 +1,5 @@
 [programs.localnet]
-member_auction = "ESTKKn8WMNMPqp9cbLGH86GwFqEnPgHVc9MyZwKGo5Wh"
+membership_auction = "6Zt81sekecE5npwcDSLveAH1Uvs75DfXqaquLbXdPpD1"
 
 [registry]
 url = "https://anchor.projectserum.com"

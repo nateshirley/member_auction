@@ -1,12 +1,12 @@
 [package]
-name = "member_auction"
+name = "membership_auction"
 version = "0.1.0"
 description = "Created with Anchor"
 edition = "2018"
 
 [lib]
 crate-type = ["cdylib", "lib"]
-name = "member_auction"
+name = "membership_auction"
 
 [features]
 no-entrypoint = []
