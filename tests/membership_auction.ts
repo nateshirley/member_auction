@@ -70,6 +70,8 @@ describe("membership_auction", () => {
       }
     );
     console.log("Your transaction signature", tx);
+    let bids = await program.account.membershipAuction.fetch(membershipAuction);
+    console.log(bids);
   });
 
   it("place a bid", async () => {
@@ -79,19 +81,26 @@ describe("membership_auction", () => {
     let amount = 1 * web3.LAMPORTS_PER_SOL;
     let amountBN = new BN(amount);
 
-    const tx = await program.rpc.placeBid(houseAuthorityBump, epoch, amountBN, {
-      accounts: {
-        bidder: bidder.publicKey,
-        newestLoser: await getLosingBidder(membershipAuction),
-        membershipAuction: membershipAuction,
-        houseAuthority: houseAuthority,
-        systemProgram: web3.SystemProgram.programId,
-      },
-      signers: [bidder],
-    });
+    const tx = await program.rpc.placeBid(
+      houseAuthorityBump,
+      membershipAuctionBump,
+      epoch,
+      amountBN,
+      {
+        accounts: {
+          bidder: bidder.publicKey,
+          newestLoser: await getLosingBidder(membershipAuction),
+          membershipAuction: membershipAuction,
+          houseAuthority: houseAuthority,
+          systemProgram: web3.SystemProgram.programId,
+        },
+        signers: [bidder],
+      }
+    );
 
     await program.rpc.placeBid(
       houseAuthorityBump,
+      membershipAuctionBump,
       epoch,
       new BN(2 * web3.LAMPORTS_PER_SOL),
       {
@@ -105,6 +114,90 @@ describe("membership_auction", () => {
         signers: [bidder],
       }
     );
+
+    let balance = await provider.connection.getBalance(bidder.publicKey);
+    console.log(balance);
+
+    let postBid = await provider.connection.getBalance(creator.publicKey);
+    //console.log("postBid: ", postBid);
+
+    let bids = await program.account.membershipAuction.fetch(membershipAuction);
+    console.log(bids);
+    let rawBids = await provider.connection.getAccountInfo(membershipAuction);
+    console.log(rawBids);
+    let storedBids: any = bids.bids;
+    storedBids.map((bid) => {
+      let bidder: PublicKey = bid.bidder;
+      console.log("bidder: ", bidder.toBase58());
+      console.log("amount: ", bid.amount.toString());
+    });
+  });
+  /*
+  it("settle auction", async () => {
+    const tx = await program.rpc.settleMembershipAuction(winnersBump, epoch, {
+      accounts: {
+        settler: creator.publicKey,
+        membershipAuction: membershipAuction,
+        winners: winners,
+        systemProgram: web3.SystemProgram.programId,
+      },
+    });
+
+    let results = await program.account.membershipAuctionWinners.fetch(winners);
+    let record: any = results.record;
+    record.map((recordedWinner) => {
+      let winner: PublicKey = recordedWinner.wallet;
+      console.log("bidder: ", winner.toBase58());
+      console.log("hasclaimed: ", recordedWinner.hasClaimed);
+    });
+  });
+
+  it("claim memberhsip from auction", async () => {
+    const tx = await program.rpc.claimMembershipFromAuction({
+      accounts: {
+        claimant: otherBidder.publicKey,
+        winners: winners,
+      },
+      signers: [otherBidder],
+    });
+
+    let results = await program.account.membershipAuctionWinners.fetch(winners);
+    let record: any = results.record;
+    record.map((recordedWinner) => {
+      let winner: PublicKey = recordedWinner.wallet;
+      console.log("bidder: ", winner.toBase58());
+      console.log("hasclaimed: ", recordedWinner.hasClaimed);
+    });
+  });
+  */
+
+  const getMembershipAuctionAddress = async (epoch: number) => {
+    let toArrayLike = new Int32Array([epoch]).buffer;
+    let epochArray = new Uint8Array(toArrayLike);
+    return await PublicKey.findProgramAddress(
+      [anchor.utils.bytes.utf8.encode("mship_axn"), epochArray], //
+      program.programId
+    );
+  };
+  const getLosingBidder = async (membershipAuctionAddress: PublicKey) => {
+    let membershipAuction: any = await program.account.membershipAuction.fetch(
+      membershipAuctionAddress
+    );
+    let length = membershipAuction.bids.length;
+    let loser: PublicKey = membershipAuction.bids[length - 1].bidder;
+    return loser;
+  };
+  const getMembershipWinnersAddress = async (epoch: number) => {
+    let toArrayLike = new Int32Array([epoch]).buffer;
+    let epochArray = new Uint8Array(toArrayLike);
+    return await PublicKey.findProgramAddress(
+      [anchor.utils.bytes.utf8.encode("winners"), epochArray], //
+      program.programId
+    );
+  };
+});
+
+/* 
 
     await program.rpc.placeBid(
       houseAuthorityBump,
@@ -170,80 +263,15 @@ describe("membership_auction", () => {
       }
     );
 
-    let balance = await provider.connection.getBalance(bidder.publicKey);
-    console.log(balance);
+*/
 
-    let postBid = await provider.connection.getBalance(creator.publicKey);
-    //console.log("postBid: ", postBid);
+// let firstBidder = rawBids.data.slice(20, 52);
+// let kk = new PublicKey(firstBidder);
+// console.log(kk.toBase58());
+//8 + 4 + 8
 
-    let bids = await program.account.membershipAuction.fetch(membershipAuction);
-    let storedBids: any = bids.bids;
-    storedBids.map((bid) => {
-      let bidder: PublicKey = bid.bidder;
-      console.log("bidder: ", bidder.toBase58());
-      console.log("amount: ", bid.amount.toNumber());
-    });
-  });
-
-  it("settle auction", async () => {
-    const tx = await program.rpc.settleMembershipAuction(winnersBump, epoch, {
-      accounts: {
-        settler: creator.publicKey,
-        membershipAuction: membershipAuction,
-        winners: winners,
-        systemProgram: web3.SystemProgram.programId,
-      },
-    });
-
-    let results = await program.account.membershipAuctionWinners.fetch(winners);
-    let record: any = results.record;
-    record.map((recordedWinner) => {
-      let winner: PublicKey = recordedWinner.wallet;
-      console.log("bidder: ", winner.toBase58());
-      console.log("hasclaimed: ", recordedWinner.hasClaimed);
-    });
-  });
-
-  it("claim memberhsip from auction", async () => {
-    const tx = await program.rpc.claimMembershipFromAuction({
-      accounts: {
-        claimant: otherBidder.publicKey,
-        winners: winners,
-      },
-      signers: [otherBidder],
-    });
-
-    let results = await program.account.membershipAuctionWinners.fetch(winners);
-    let record: any = results.record;
-    record.map((recordedWinner) => {
-      let winner: PublicKey = recordedWinner.wallet;
-      console.log("bidder: ", winner.toBase58());
-      console.log("hasclaimed: ", recordedWinner.hasClaimed);
-    });
-  });
-
-  const getMembershipAuctionAddress = async (epoch: number) => {
-    let toArrayLike = new Int32Array([epoch]).buffer;
-    let epochArray = new Uint8Array(toArrayLike);
-    return await PublicKey.findProgramAddress(
-      [anchor.utils.bytes.utf8.encode("mship_axn"), epochArray], //
-      program.programId
-    );
-  };
-  const getLosingBidder = async (membershipAuctionAddress: PublicKey) => {
-    let membershipAuction: any = await program.account.membershipAuction.fetch(
-      membershipAuctionAddress
-    );
-    let length = membershipAuction.bids.length;
-    let loser: PublicKey = membershipAuction.bids[length - 1].bidder;
-    return loser;
-  };
-  const getMembershipWinnersAddress = async (epoch: number) => {
-    let toArrayLike = new Int32Array([epoch]).buffer;
-    let epochArray = new Uint8Array(toArrayLike);
-    return await PublicKey.findProgramAddress(
-      [anchor.utils.bytes.utf8.encode("winners"), epochArray], //
-      program.programId
-    );
-  };
-});
+//let kp = new PublicKey("5J8jLVz5YY5uc9sJuWtx42VVMUanLGYWoPXMRu7GsNEJ");
+// console.log(kp.toBytes());
+// let arr = kp.toBytes();
+// let g = Array.from(arr);
+// console.log(g);

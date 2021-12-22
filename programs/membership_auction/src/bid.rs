@@ -1,10 +1,12 @@
 use anchor_lang::{prelude::*, solana_program};
 
-#[derive(Clone, Copy, AnchorDeserialize, AnchorSerialize)]
+// #[derive(Clone, Copy, AnchorDeserialize, AnchorSerialize)]
+#[zero_copy]
 pub struct Bid {
     pub bidder: Pubkey,
     pub amount: u64,
 }
+
 impl Default for Bid {
     fn default() -> Bid {
         let pubkey_array: [u8; 32] = [
@@ -18,7 +20,7 @@ impl Default for Bid {
     }
 }
 impl std::cmp::Ord for Bid {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Bid) -> std::cmp::Ordering {
         self.amount.cmp(&other.amount)
     }
 }

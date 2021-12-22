@@ -5,7 +5,7 @@ declare_id!("6Zt81sekecE5npwcDSLveAH1Uvs75DfXqaquLbXdPpD1");
 const HOUSE_SEED: &[u8] = b"house_auth";
 const MEMBERSHIP_AUCTION_SEED: &[u8] = b"mship_axn";
 const WINNERS_SEED: &[u8] = b"winners";
-const NUM_BIDS: usize = 4;
+const NUM_BIDS: usize = 50;
 const MINIMUM_OPENING_BID: u64 = 100;
 
 mod anchor_transfer;
@@ -30,13 +30,13 @@ pub mod membership_auction {
         epoch: u32,
     ) -> ProgramResult {
         //obvi need more checks around when it can start
-
-        ctx.accounts.membership_auction.bump = membership_auction_bump;
-        ctx.accounts.membership_auction.epoch = epoch;
-        ctx.accounts.membership_auction.start_timestamp =
+        let mut membership_auction = ctx.accounts.membership_auction.load_init()?;
+        membership_auction.bump = membership_auction_bump;
+        membership_auction.epoch = epoch;
+        membership_auction.start_timestamp =
             u64::try_from(ctx.accounts.clock.unix_timestamp).unwrap();
 
-        ctx.accounts.membership_auction.bids = [Bid::default(); 4];
+        membership_auction.bids = [Bid::default(); NUM_BIDS];
         Ok(())
     }
 
@@ -44,23 +44,24 @@ pub mod membership_auction {
     pub fn place_bid(
         ctx: Context<PlaceBid>,
         house_authority_bump: u8,
+        _membership_auction_bump: u8,
         _epoch: u32,
         amount: u64,
     ) -> ProgramResult {
         //storing bids in descending order so i can always pop the lowest value off the end
         //ie biggest value at zero
+        let mut membership_auction = ctx.accounts.membership_auction.load_mut()?;
+        // verify_bid_amount(amount, &membership_auction)?;
+        // //tranfer lamps from bidder to the house
+        // anchor_transfer::transfer_from_signer(ctx.accounts.into_receive_bid_context(), amount)?;
 
-        verify_bid_amount(amount, &ctx.accounts.membership_auction)?;
-        //tranfer lamps from bidder to the house
-        anchor_transfer::transfer_from_signer(ctx.accounts.into_receive_bid_context(), amount)?;
-
-        let mut open_bids = ctx.accounts.membership_auction.bids.to_vec();
+        let mut open_bids = membership_auction.bids.to_vec();
         let new_bid = Bid {
             bidder: ctx.accounts.bidder.key(),
             amount: amount,
         };
         //turn it back on later
-        //verify_unique_bidder(ctx.accounts.bidder.key, &open_bids)?;
+        // //verify_unique_bidder(ctx.accounts.bidder.key, &open_bids)?;
         match open_bids.binary_search_by(|probe| probe.cmp(&new_bid).reverse()) {
             Ok(pos) => {
                 //someone submits a bid that is equal to an existing bid, but higher than the minimum
@@ -73,7 +74,7 @@ pub mod membership_auction {
                         open_bids.pop().unwrap(),
                         house_authority_bump,
                     )?;
-                    ctx.accounts.membership_auction.bids = new_bids_arr_from_vec(open_bids);
+                    membership_auction.bids = new_bids_arr_from_vec(open_bids);
                 }
             }
             Err(pos) => {
@@ -84,7 +85,7 @@ pub mod membership_auction {
                         open_bids.pop().unwrap(),
                         house_authority_bump,
                     )?;
-                    ctx.accounts.membership_auction.bids = new_bids_arr_from_vec(open_bids);
+                    membership_auction.bids = new_bids_arr_from_vec(open_bids);
                 }
             }
         }
@@ -98,8 +99,8 @@ pub mod membership_auction {
     ) -> ProgramResult {
         //validate the time
         //declare the winners
-
-        for (i, winning_bid) in ctx.accounts.membership_auction.bids.iter().enumerate() {
+        let auction = ctx.accounts.membership_auction.load()?;
+        for (i, winning_bid) in auction.bids.iter().enumerate() {
             ctx.accounts.winners.record[i] = MembershipAuctionWinner {
                 wallet: winning_bid.bidder,
                 has_claimed: false,
@@ -120,6 +121,164 @@ pub mod membership_auction {
         }
         Err(ErrorCode::NoAuctionClaimAuthority.into())
     }
+}
+
+fn verify_unique_bidder(new_bidder: &Pubkey, open_bids: &Vec<Bid>) -> ProgramResult {
+    for bid in open_bids {
+        if bid.bidder.eq(new_bidder) {
+            return Err(ErrorCode::NonUniqueBidder.into());
+        }
+    }
+    Ok(())
+}
+fn new_bids_arr_from_vec(mut open_bids: Vec<Bid>) -> [Bid; NUM_BIDS] {
+    let mut new_bids = [Bid::default(); NUM_BIDS];
+    for i in (0..NUM_BIDS).rev() {
+        new_bids[i] = open_bids.pop().unwrap();
+    }
+    return new_bids;
+}
+fn verify_bid_amount(
+    amount: u64,
+    membership_auction: &MembershipAuction,
+) -> ProgramResult {
+    const MIN_INCREMENT_PERCENTAGE: u64 = 2;
+    let lowest_bid_index = membership_auction.bids.len() - 1;
+    let lowest_bid = if membership_auction.bids[lowest_bid_index].amount > 0 {
+        membership_auction.bids[lowest_bid_index].amount
+    } else {
+        MINIMUM_OPENING_BID
+    };
+    let min_bid = lowest_bid
+        + lowest_bid
+            .checked_mul(MIN_INCREMENT_PERCENTAGE)
+            .unwrap()
+            .checked_div(100)
+            .unwrap();
+    msg!("lowest_bid: {}, min_bid: {}", lowest_bid, min_bid);
+    if amount > min_bid {
+        Ok(())
+    } else {
+        Err(ErrorCode::LowBallBid.into())
+    }
+}
+
+#[derive(Accounts)]
+#[instruction(membership_auction_bump: u8, epoch: u32)]
+pub struct CreateMembershipAuction<'info> {
+    creator: Signer<'info>,
+    #[account(
+        init,
+        seeds = [MEMBERSHIP_AUCTION_SEED, &epoch.to_le_bytes()],
+        bump = membership_auction_bump,
+        payer = creator
+    )]
+    membership_auction: AccountLoader<'info, MembershipAuction>,
+    clock: Sysvar<'info, Clock>,
+    system_program: Program<'info, System>,
+}
+
+//add check to verify Membership auction time
+#[derive(Accounts)]
+#[instruction(house_authority_bump: u8, membership_auction_bump: u8, epoch: u32)]
+pub struct PlaceBid<'info> {
+    #[account(mut)]
+    bidder: Signer<'info>,
+    #[account(mut)]
+    newest_loser: AccountInfo<'info>,
+    #[account(
+        mut,
+        seeds = [MEMBERSHIP_AUCTION_SEED, &epoch.to_le_bytes()],
+        bump = membership_auction_bump,
+    )]
+    membership_auction: AccountLoader<'info, MembershipAuction>,
+    #[account(
+        mut,
+        seeds = [HOUSE_SEED],
+        bump = house_authority_bump
+    )]
+    house_authority: UncheckedAccount<'info>,
+    system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+#[instruction(winners_bump: u8, epoch: u32)]
+pub struct SettleMembershipAuction<'info> {
+    settler: Signer<'info>,
+    // #[account(
+    //     seeds = [MEMBERSHIP_AUCTION_SEED, &epoch.to_le_bytes()],
+    //     bump = membership_auction.bump
+    // )]
+    membership_auction: AccountLoader<'info, MembershipAuction>,
+    #[account(
+        init,
+        seeds = [WINNERS_SEED, &epoch.to_le_bytes()],
+        bump = winners_bump,
+        payer = settler
+    )]
+    winners: Account<'info, MembershipAuctionWinners>,
+    system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct ClaimMembershipFromAuction<'info> {
+    claimant: Signer<'info>,
+    //add address verification
+    #[account(mut)]
+    winners: Account<'info, MembershipAuctionWinners>,
+}
+
+#[account]
+#[derive(Default)]
+pub struct MembershipAuctionWinners {
+    record: [MembershipAuctionWinner; 4],
+}
+
+#[derive(Default, Clone, Copy, AnchorDeserialize, AnchorSerialize)]
+pub struct MembershipAuctionWinner {
+    wallet: Pubkey,
+    has_claimed: bool,
+}
+
+#[account(zero_copy)]
+pub struct MembershipAuction {
+    epoch: u32,
+    start_timestamp: u64,
+    bids: [Bid; 50],
+    bump: u8,
+}
+impl Default for MembershipAuction {
+    fn default() -> Self {
+        MembershipAuction {
+            epoch: 0,
+            start_timestamp: 0,
+            bids: [Bid::default(); 50],
+            bump: 0
+        }
+    }
+}
+
+/*
+pub struct Bid {
+    pub bidder: Pubkey,
+    pub amount: u64,
+}
+a bid is 32 bytes
+a u64 is 8 bytes
+so that's 40 bytes on the bid
+
+4kb is 4096 bytes
+theoretical limit to loading a bids array on the stack is about 100 bids
+*/
+
+#[error]
+pub enum ErrorCode {
+    #[msg("bid does not meet minimum for this auction (lowest * 1.02)")]
+    LowBallBid,
+    #[msg("bidding wallet has already placed a bid on this auction")]
+    NonUniqueBidder,
+    #[msg("wallet has no authority to claim. either they didn't win or they already claimed")]
+    NoAuctionClaimAuthority,
 }
 
 impl<'info> PlaceBid<'info> {
@@ -165,138 +324,3 @@ fn return_lamps_to_newest_loser(
     Ok(())
 }
 
-fn verify_unique_bidder(new_bidder: &Pubkey, open_bids: &Vec<Bid>) -> ProgramResult {
-    for bid in open_bids {
-        if bid.bidder.eq(new_bidder) {
-            return Err(ErrorCode::NonUniqueBidder.into());
-        }
-    }
-    Ok(())
-}
-fn new_bids_arr_from_vec(mut open_bids: Vec<Bid>) -> [Bid; NUM_BIDS] {
-    let mut new_bids = [Bid::default(); NUM_BIDS];
-    for i in (0..NUM_BIDS).rev() {
-        new_bids[i] = open_bids.pop().unwrap();
-    }
-    return new_bids;
-}
-fn verify_bid_amount(
-    amount: u64,
-    membership_auction: &Account<MembershipAuction>,
-) -> ProgramResult {
-    const MIN_INCREMENT_PERCENTAGE: u64 = 2;
-    let lowest_bid_index = membership_auction.bids.len() - 1;
-    let lowest_bid = if membership_auction.bids[lowest_bid_index].amount > 0 {
-        membership_auction.bids[lowest_bid_index].amount
-    } else {
-        MINIMUM_OPENING_BID
-    };
-    let min_bid = lowest_bid
-        + lowest_bid
-            .checked_mul(MIN_INCREMENT_PERCENTAGE)
-            .unwrap()
-            .checked_div(100)
-            .unwrap();
-    msg!("lowest_bid: {}, min_bid: {}", lowest_bid, min_bid);
-    if amount > min_bid {
-        Ok(())
-    } else {
-        Err(ErrorCode::LowBallBid.into())
-    }
-}
-
-#[derive(Accounts)]
-#[instruction(membership_auction_bump: u8, epoch: u32)]
-pub struct CreateMembershipAuction<'info> {
-    creator: Signer<'info>,
-    #[account(
-        init,
-        seeds = [MEMBERSHIP_AUCTION_SEED, &epoch.to_le_bytes()],
-        bump = membership_auction_bump,
-        payer = creator
-    )]
-    membership_auction: Account<'info, MembershipAuction>,
-    clock: Sysvar<'info, Clock>,
-    system_program: Program<'info, System>,
-}
-
-//add check to verify Membership auction time
-#[derive(Accounts)]
-#[instruction(house_authority_bump: u8, epoch: u32)]
-pub struct PlaceBid<'info> {
-    #[account(mut)]
-    bidder: Signer<'info>,
-    #[account(mut)]
-    newest_loser: AccountInfo<'info>,
-    #[account(
-        mut,
-        seeds = [MEMBERSHIP_AUCTION_SEED, &epoch.to_le_bytes()],
-        bump = membership_auction.bump,
-    )]
-    membership_auction: Account<'info, MembershipAuction>,
-    #[account(
-        mut,
-        seeds = [HOUSE_SEED],
-        bump = house_authority_bump
-    )]
-    house_authority: UncheckedAccount<'info>,
-    system_program: Program<'info, System>,
-}
-
-#[derive(Accounts)]
-#[instruction(winners_bump: u8, epoch: u32)]
-pub struct SettleMembershipAuction<'info> {
-    settler: Signer<'info>,
-    #[account(
-        seeds = [MEMBERSHIP_AUCTION_SEED, &epoch.to_le_bytes()],
-        bump = membership_auction.bump
-    )]
-    membership_auction: Account<'info, MembershipAuction>,
-    #[account(
-        init,
-        seeds = [WINNERS_SEED, &epoch.to_le_bytes()],
-        bump = winners_bump,
-        payer = settler
-    )]
-    winners: Account<'info, MembershipAuctionWinners>,
-    system_program: Program<'info, System>,
-}
-
-#[derive(Accounts)]
-pub struct ClaimMembershipFromAuction<'info> {
-    claimant: Signer<'info>,
-    //add address verification
-    #[account(mut)]
-    winners: Account<'info, MembershipAuctionWinners>,
-}
-
-#[account]
-#[derive(Default)]
-pub struct MembershipAuctionWinners {
-    record: [MembershipAuctionWinner; 4],
-}
-
-#[derive(Default, Clone, Copy, AnchorDeserialize, AnchorSerialize)]
-pub struct MembershipAuctionWinner {
-    wallet: Pubkey,
-    has_claimed: bool,
-}
-
-#[account]
-#[derive(Default)]
-pub struct MembershipAuction {
-    epoch: u32,
-    start_timestamp: u64,
-    bids: [Bid; 4],
-    bump: u8,
-}
-
-#[error]
-pub enum ErrorCode {
-    #[msg("bid does not meet minimum for this auction (lowest * 1.02)")]
-    LowBallBid,
-    #[msg("bidding wallet has already placed a bid on this auction")]
-    NonUniqueBidder,
-    #[msg("wallet has no authority to claim. either they didn't win or they already claimed")]
-    NoAuctionClaimAuthority,
-}

@@ -1,6 +1,7 @@
 {
     "dependencies": {
         "@project-serum/anchor": "^0.18.2",
+        "@types/chai": "^4.2.22",
         "bn.js": "^5.2.0"
     },
     "devDependencies": {
