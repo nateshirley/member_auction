@@ -50,7 +50,7 @@ describe("membership_auction", () => {
 
     await provider.connection.requestAirdrop(
       bidder.publicKey,
-      web3.LAMPORTS_PER_SOL * 8
+      web3.LAMPORTS_PER_SOL * 800
     );
     await provider.connection.requestAirdrop(
       otherBidder.publicKey,
@@ -119,16 +119,13 @@ describe("membership_auction", () => {
   // }
 
   it("place a bid", async () => {
-    let preBid = await provider.connection.getBalance(creator.publicKey);
+    //let preBid = await provider.connection.getBalance(creator.publicKey);
     //console.log("preBid: ", preBid);
 
-    await placeBid(2, 0);
+    //await placeBid(2, 0);
     await placeBid(2, 1);
     await placeBid(2, 2);
     await placeBid(2, 3);
-
-    let houseBalance = await provider.connection.getBalance(houseAuthority);
-    console.log("house: ", houseBalance);
 
     let bids = await program.account.membershipAuction.fetch(
       auctionAddresses[1]
@@ -139,8 +136,23 @@ describe("membership_auction", () => {
     //   console.log("bidder: ", bidder.toBase58());
     //   console.log("amount: ", bid.amount.toNumber());
     // });
-  });
 
+    for (let i = 1; i < 5; i++) {
+      await placeBid(i, 0);
+    }
+
+    let auction = await program.account.membershipAuction.fetch(
+      auctionAddresses[0]
+    );
+    // let b: any = auction.bids;
+    // b.forEach((bid: any) => {
+    //   console.log("bidder: ", bid.bidder.toBase58());
+    //   console.log("amount: ", bid.amount.toString());
+    // });
+
+    let houseBalance = await provider.connection.getBalance(houseAuthority);
+    console.log("house: ", houseBalance);
+  });
   const placeBid = async (sol: number, index: number) => {
     await program.rpc.placeBid(
       houseAuthorityBump,
@@ -158,6 +170,27 @@ describe("membership_auction", () => {
     );
   };
 
+  it("update a bid", async () => {
+    await program.rpc.updateBid(
+      houseAuthorityBump,
+      0,
+      new BN(5 * web3.LAMPORTS_PER_SOL),
+      {
+        accounts: {
+          bidder: bidder.publicKey,
+          membershipAuction: auctionAddresses[0],
+          houseAuthority: houseAuthority,
+          systemProgram: web3.SystemProgram.programId,
+        },
+        signers: [bidder],
+      }
+    );
+
+    let houseBalance = await provider.connection.getBalance(houseAuthority);
+    console.log("house: ", houseBalance);
+  });
+
+  /*
   it("claim memberhsip from auction", async () => {
     const tx = await program.rpc.claimMembershipFromAuction({
       accounts: {
@@ -173,8 +206,7 @@ describe("membership_auction", () => {
     );
     console.log(results);
   });
-  /*
-   */
+  */
 
   const getMembershipAuctionAddress = async (epoch: number, index: number) => {
     let toEpochArrayLike = new Int32Array([epoch]).buffer;
@@ -211,7 +243,14 @@ describe("membership_auction", () => {
     );
   };
 });
-
+//it("fetches", (async) => {
+//how to get back the results
+// i need
+// which auction has the lowest price; that's where u submit the bid
+//i need
+//update my bid?
+//i can do client finding, so u can pass in an index
+//});
 /*
 it("settle auction", async () => {
     const tx = await program.rpc.settleMembershipAuction(winnersBump, epoch, {

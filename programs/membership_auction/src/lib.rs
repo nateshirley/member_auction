@@ -76,7 +76,7 @@ pub mod membership_auction {
         };
         //turn it back on later
         //verify_unique_bidder(ctx.accounts.bidder.key, &open_bids)?;
-        //p sure if there's no match it returns where the value should be
+        //if there's no match it returns where the index where the value should go to maintain sorted order
         match open_bids.binary_search_by(|probe| probe.cmp(&new_bid).reverse()) {
             Ok(pos) => {
                 //someone submits a bid that is equal to an existing bid, but higher than the minimum
@@ -107,6 +107,44 @@ pub mod membership_auction {
         Ok(())
     }
 
+    pub fn update_bid(
+        ctx: Context<UpdateBid>,
+        house_authority_bump: u8,
+        _bid_index: u8,
+        amount: u64,
+    ) -> ProgramResult {
+        let bid_index = usize::from(_bid_index);
+        let mut open_bids = ctx.accounts.membership_auction.bids.to_vec();
+        let old_bid = &open_bids[bid_index];
+        if ctx.accounts.bidder.key() == old_bid.bidder && amount > old_bid.amount {
+            let new_bid = Bid {
+                bidder: ctx.accounts.bidder.key(),
+                amount: amount,
+            };
+            let lamps_due = new_bid.amount.checked_sub(old_bid.amount).unwrap();
+            open_bids.remove(bid_index);
+            //similar to process above, only this time just change the bids and don't do any value transfers
+            match open_bids.binary_search_by(|probe| probe.cmp(&new_bid).reverse()) {
+                Ok(pos) => {
+                    if pos < open_bids.len() {
+                        open_bids.insert(pos + 1, new_bid);
+                        ctx.accounts.membership_auction.bids = new_bids_arr_from_vec(open_bids);
+                    }
+                }
+                Err(pos) => {
+                    if pos < open_bids.len() {
+                        open_bids.insert(pos, new_bid);
+                        ctx.accounts.membership_auction.bids = new_bids_arr_from_vec(open_bids);
+                    }
+                }
+            }
+            receive_lamps_from_updated_bid(&ctx, lamps_due, house_authority_bump)?;
+            Ok(())
+        } else {
+            Err(ErrorCode::NoBidUpdateAuthority.into())
+        }
+    }
+
     pub fn claim_membership_from_auction(
         ctx: Context<ClaimMembershipFromAuction>,
     ) -> ProgramResult {
@@ -120,6 +158,25 @@ pub mod membership_auction {
         }
         Err(ErrorCode::NoAuctionClaimAuthority.into())
     }
+}
+
+pub fn swallow(ctx: Context<UpdateBid>) -> () {
+    ctx.accounts.membership_auction.bump = 200;
+}
+
+fn receive_lamps_from_updated_bid(
+    ctx: &Context<UpdateBid>,
+    lamps_due: u64,
+    house_authority_bump: u8,
+) -> ProgramResult {
+    let seeds = &[&HOUSE_SEED[..], &[house_authority_bump]];
+    anchor_transfer::transfer_from_pda(
+        ctx.accounts
+            .into_receive_lamps_from_updated_bid_context()
+            .with_signer(&[&seeds[..]]),
+        lamps_due,
+    )?;
+    Ok(())
 }
 
 impl<'info> PlaceBid<'info> {
@@ -141,6 +198,20 @@ impl<'info> PlaceBid<'info> {
         let cpi_accounts = anchor_transfer::TransferLamports {
             from: self.house_authority.to_account_info(),
             to: self.newest_loser.to_account_info(),
+            system_program: self.system_program.clone(),
+        };
+        CpiContext::new(cpi_program, cpi_accounts)
+    }
+}
+
+impl<'info> UpdateBid<'info> {
+    fn into_receive_lamps_from_updated_bid_context(
+        &self,
+    ) -> CpiContext<'_, '_, '_, 'info, anchor_transfer::TransferLamports<'info>> {
+        let cpi_program = self.system_program.to_account_info();
+        let cpi_accounts = anchor_transfer::TransferLamports {
+            from: self.bidder.to_account_info(),
+            to: self.house_authority.to_account_info(),
             system_program: self.system_program.clone(),
         };
         CpiContext::new(cpi_program, cpi_accounts)
@@ -210,6 +281,26 @@ pub struct PlaceBid<'info> {
     system_program: Program<'info, System>,
 }
 
+#[derive(Accounts)]
+#[instruction(house_authority_bump: u8)]
+pub struct UpdateBid<'info> {
+    #[account(mut)]
+    bidder: Signer<'info>,
+    #[account(
+        mut,
+        seeds = [MEMBERSHIP_AUCTION_SEED, &membership_auction.epoch.to_le_bytes(), &[membership_auction.index]],
+        bump = membership_auction.bump,
+    )]
+    membership_auction: Account<'info, MembershipAuction>,
+    #[account(
+        mut,
+        seeds = [HOUSE_SEED],
+        bump = house_authority_bump
+    )]
+    house_authority: UncheckedAccount<'info>,
+    system_program: Program<'info, System>,
+}
+
 #[account]
 #[derive(Default)]
 pub struct MembershipAuction {
@@ -260,6 +351,8 @@ pub enum ErrorCode {
     NonUniqueBidder,
     #[msg("wallet has no authority to claim. either they didn't win or they already claimed")]
     NoAuctionClaimAuthority,
+    #[msg("bidder passed does not have authority to update this bid. either they did not submit the old bid or the new bid is not high enough ")]
+    NoBidUpdateAuthority,
 }
 fn verify_unique_bidder(new_bidder: &Pubkey, open_bids: &Vec<Bid>) -> ProgramResult {
     for bid in open_bids {
@@ -293,7 +386,12 @@ fn verify_bid_amount(
             .unwrap()
             .checked_div(100)
             .unwrap();
-    msg!("lowest_bid: {}, min_bid: {}", lowest_bid, min_bid);
+    msg!(
+        "lowest_bid: {}, min_bid: {}, your bid {}",
+        lowest_bid,
+        min_bid,
+        amount
+    );
     if amount > min_bid {
         Ok(())
     } else {
