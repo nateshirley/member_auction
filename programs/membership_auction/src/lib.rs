@@ -5,7 +5,8 @@ declare_id!("6Zt81sekecE5npwcDSLveAH1Uvs75DfXqaquLbXdPpD1");
 const HOUSE_SEED: &[u8] = b"house_auth";
 const MEMBERSHIP_AUCTION_SEED: &[u8] = b"mship_axn";
 const WINNERS_SEED: &[u8] = b"winners";
-const NUM_BIDS: usize = 4;
+const HAS_CLAIMED_SEED: &[u8] = b"has_claimed";
+const NUM_BIDS: usize = 20;
 const MINIMUM_OPENING_BID: u64 = 100;
 
 mod anchor_transfer;
@@ -20,31 +21,45 @@ pub mod membership_auction {
     /*
     1. create auction
     2. place bid
-    3. finalize auction
     4. claim winnings
+    */
+
+    /*
+    ok so say i wanted to shard the bids
+    i would basically run someth client-side that detects which auction has the lowest running bid?
+    and then i would submit a bid to that auction
+    i could try to prevent the bidder from submitting across multiple different auctions
+    but i'm not sure why i would really need to do that
+    i don't even think i need to do anything else
+
+    if i put a timer on it i wouldn't even need to keep the winners in here
+    verify clock u feel
+
     */
 
     pub fn create_membership_auction(
         ctx: Context<CreateMembershipAuction>,
         membership_auction_bump: u8,
+        has_claimed_bump: u8,
         epoch: u32,
+        index: u8,
     ) -> ProgramResult {
         //obvi need more checks around when it can start
 
-        ctx.accounts.membership_auction.bump = membership_auction_bump;
         ctx.accounts.membership_auction.epoch = epoch;
         ctx.accounts.membership_auction.start_timestamp =
             u64::try_from(ctx.accounts.clock.unix_timestamp).unwrap();
+        ctx.accounts.membership_auction.index = index;
+        ctx.accounts.membership_auction.bump = membership_auction_bump;
+        ctx.accounts.membership_auction.bids = [Bid::default(); NUM_BIDS];
 
-        ctx.accounts.membership_auction.bids = [Bid::default(); 4];
+        ctx.accounts.has_claimed.bump = has_claimed_bump;
         Ok(())
     }
 
-    //lol i need to work on the leaderboard, this is much cleaner.
     pub fn place_bid(
         ctx: Context<PlaceBid>,
         house_authority_bump: u8,
-        _epoch: u32,
         amount: u64,
     ) -> ProgramResult {
         //storing bids in descending order so i can always pop the lowest value off the end
@@ -61,6 +76,7 @@ pub mod membership_auction {
         };
         //turn it back on later
         //verify_unique_bidder(ctx.accounts.bidder.key, &open_bids)?;
+        //if there's no match it returns where the index where the value should go to maintain sorted order
         match open_bids.binary_search_by(|probe| probe.cmp(&new_bid).reverse()) {
             Ok(pos) => {
                 //someone submits a bid that is equal to an existing bid, but higher than the minimum
@@ -91,35 +107,76 @@ pub mod membership_auction {
         Ok(())
     }
 
-    pub fn settle_membership_auction(
-        ctx: Context<SettleMembershipAuction>,
-        _winners_bump: u8,
-        _epoch: u32,
+    pub fn update_bid(
+        ctx: Context<UpdateBid>,
+        house_authority_bump: u8,
+        _bid_index: u8,
+        amount: u64,
     ) -> ProgramResult {
-        //validate the time
-        //declare the winners
-
-        for (i, winning_bid) in ctx.accounts.membership_auction.bids.iter().enumerate() {
-            ctx.accounts.winners.record[i] = MembershipAuctionWinner {
-                wallet: winning_bid.bidder,
-                has_claimed: false,
+        let bid_index = usize::from(_bid_index);
+        let mut open_bids = ctx.accounts.membership_auction.bids.to_vec();
+        let old_bid = &open_bids[bid_index];
+        if ctx.accounts.bidder.key() == old_bid.bidder && amount > old_bid.amount {
+            let new_bid = Bid {
+                bidder: ctx.accounts.bidder.key(),
+                amount: amount,
             };
+            let lamps_due = new_bid.amount.checked_sub(old_bid.amount).unwrap();
+            open_bids.remove(bid_index);
+            //similar to process above, only this time just change the bids and don't do any value transfers
+            match open_bids.binary_search_by(|probe| probe.cmp(&new_bid).reverse()) {
+                Ok(pos) => {
+                    if pos < open_bids.len() {
+                        open_bids.insert(pos + 1, new_bid);
+                        ctx.accounts.membership_auction.bids = new_bids_arr_from_vec(open_bids);
+                    }
+                }
+                Err(pos) => {
+                    if pos < open_bids.len() {
+                        open_bids.insert(pos, new_bid);
+                        ctx.accounts.membership_auction.bids = new_bids_arr_from_vec(open_bids);
+                    }
+                }
+            }
+            receive_lamps_from_updated_bid(&ctx, lamps_due, house_authority_bump)?;
+            Ok(())
+        } else {
+            Err(ErrorCode::NoBidUpdateAuthority.into())
         }
-        Ok(())
     }
 
     pub fn claim_membership_from_auction(
         ctx: Context<ClaimMembershipFromAuction>,
     ) -> ProgramResult {
-        for winner in ctx.accounts.winners.record.iter_mut() {
-            if winner.wallet.eq(ctx.accounts.claimant.key) && !winner.has_claimed {
-                winner.has_claimed = true;
+        let bids = ctx.accounts.membership_auction.bids;
+        for (i, has_claimed) in ctx.accounts.has_claimed.record.iter_mut().enumerate() {
+            if bids[i].bidder.eq(ctx.accounts.claimant.key) && !*has_claimed {
+                *has_claimed = true;
                 return Ok(());
                 //mint the new membership
             }
         }
         Err(ErrorCode::NoAuctionClaimAuthority.into())
     }
+}
+
+pub fn swallow(ctx: Context<UpdateBid>) -> () {
+    ctx.accounts.membership_auction.bump = 200;
+}
+
+fn receive_lamps_from_updated_bid(
+    ctx: &Context<UpdateBid>,
+    lamps_due: u64,
+    house_authority_bump: u8,
+) -> ProgramResult {
+    let seeds = &[&HOUSE_SEED[..], &[house_authority_bump]];
+    anchor_transfer::transfer_from_pda(
+        ctx.accounts
+            .into_receive_lamps_from_updated_bid_context()
+            .with_signer(&[&seeds[..]]),
+        lamps_due,
+    )?;
+    Ok(())
 }
 
 impl<'info> PlaceBid<'info> {
@@ -147,6 +204,20 @@ impl<'info> PlaceBid<'info> {
     }
 }
 
+impl<'info> UpdateBid<'info> {
+    fn into_receive_lamps_from_updated_bid_context(
+        &self,
+    ) -> CpiContext<'_, '_, '_, 'info, anchor_transfer::TransferLamports<'info>> {
+        let cpi_program = self.system_program.to_account_info();
+        let cpi_accounts = anchor_transfer::TransferLamports {
+            from: self.bidder.to_account_info(),
+            to: self.house_authority.to_account_info(),
+            system_program: self.system_program.clone(),
+        };
+        CpiContext::new(cpi_program, cpi_accounts)
+    }
+}
+
 fn return_lamps_to_newest_loser(
     ctx: &Context<PlaceBid>,
     losing_bid: Bid,
@@ -165,6 +236,124 @@ fn return_lamps_to_newest_loser(
     Ok(())
 }
 
+#[derive(Accounts)]
+#[instruction(membership_auction_bump: u8, has_claimed_bump: u8, epoch: u32, index: u8)]
+pub struct CreateMembershipAuction<'info> {
+    creator: Signer<'info>,
+    #[account(
+        init,
+        seeds = [MEMBERSHIP_AUCTION_SEED, &epoch.to_le_bytes(), &[index]],
+        bump = membership_auction_bump,
+        payer = creator
+    )]
+    membership_auction: Box<Account<'info, MembershipAuction>>,
+    #[account(
+        init,
+        seeds = [HAS_CLAIMED_SEED, &epoch.to_le_bytes(), &[index]],
+        bump = has_claimed_bump,
+        payer = creator
+    )]
+    has_claimed: Box<Account<'info, HasClaimed>>,
+    clock: Sysvar<'info, Clock>,
+    system_program: Program<'info, System>,
+}
+
+//add check to verify Membership auction time
+#[derive(Accounts)]
+#[instruction(house_authority_bump: u8)]
+pub struct PlaceBid<'info> {
+    #[account(mut)]
+    bidder: Signer<'info>,
+    #[account(mut)]
+    newest_loser: AccountInfo<'info>,
+    #[account(
+        mut,
+        seeds = [MEMBERSHIP_AUCTION_SEED, &membership_auction.epoch.to_le_bytes(), &[membership_auction.index]],
+        bump = membership_auction.bump,
+    )]
+    membership_auction: Account<'info, MembershipAuction>,
+    #[account(
+        mut,
+        seeds = [HOUSE_SEED],
+        bump = house_authority_bump
+    )]
+    house_authority: UncheckedAccount<'info>,
+    system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+#[instruction(house_authority_bump: u8)]
+pub struct UpdateBid<'info> {
+    #[account(mut)]
+    bidder: Signer<'info>,
+    #[account(
+        mut,
+        seeds = [MEMBERSHIP_AUCTION_SEED, &membership_auction.epoch.to_le_bytes(), &[membership_auction.index]],
+        bump = membership_auction.bump,
+    )]
+    membership_auction: Account<'info, MembershipAuction>,
+    #[account(
+        mut,
+        seeds = [HOUSE_SEED],
+        bump = house_authority_bump
+    )]
+    house_authority: UncheckedAccount<'info>,
+    system_program: Program<'info, System>,
+}
+
+#[account]
+#[derive(Default)]
+pub struct MembershipAuction {
+    epoch: u32,
+    start_timestamp: u64,
+    bids: [Bid; 20],
+    index: u8,
+    bump: u8,
+}
+
+#[derive(Accounts)]
+pub struct ClaimMembershipFromAuction<'info> {
+    claimant: Signer<'info>,
+    #[account(
+        mut,
+        seeds = [MEMBERSHIP_AUCTION_SEED, &membership_auction.epoch.to_le_bytes(), &[membership_auction.index]],
+        bump = membership_auction.bump,
+    )]
+    membership_auction: Account<'info, MembershipAuction>,
+    #[account(
+        mut,
+        seeds = [HAS_CLAIMED_SEED, &membership_auction.epoch.to_le_bytes(), &[membership_auction.index]],
+        bump = has_claimed.bump,
+    )]
+    has_claimed: Account<'info, HasClaimed>,
+}
+
+#[account]
+pub struct HasClaimed {
+    record: [bool; 20],
+    bump: u8,
+}
+
+impl Default for HasClaimed {
+    fn default() -> HasClaimed {
+        HasClaimed {
+            record: [false; 20],
+            bump: 0,
+        }
+    }
+}
+
+#[error]
+pub enum ErrorCode {
+    #[msg("bid does not meet minimum for this auction (lowest * 1.02)")]
+    LowBallBid,
+    #[msg("bidding wallet has already placed a bid on this auction")]
+    NonUniqueBidder,
+    #[msg("wallet has no authority to claim. either they didn't win or they already claimed")]
+    NoAuctionClaimAuthority,
+    #[msg("bidder passed does not have authority to update this bid. either they did not submit the old bid or the new bid is not high enough ")]
+    NoBidUpdateAuthority,
+}
 fn verify_unique_bidder(new_bidder: &Pubkey, open_bids: &Vec<Bid>) -> ProgramResult {
     for bid in open_bids {
         if bid.bidder.eq(new_bidder) {
@@ -197,7 +386,12 @@ fn verify_bid_amount(
             .unwrap()
             .checked_div(100)
             .unwrap();
-    msg!("lowest_bid: {}, min_bid: {}", lowest_bid, min_bid);
+    msg!(
+        "lowest_bid: {}, min_bid: {}, your bid {}",
+        lowest_bid,
+        min_bid,
+        amount
+    );
     if amount > min_bid {
         Ok(())
     } else {
@@ -205,44 +399,19 @@ fn verify_bid_amount(
     }
 }
 
-#[derive(Accounts)]
-#[instruction(membership_auction_bump: u8, epoch: u32)]
-pub struct CreateMembershipAuction<'info> {
-    creator: Signer<'info>,
-    #[account(
-        init,
-        seeds = [MEMBERSHIP_AUCTION_SEED, &epoch.to_le_bytes()],
-        bump = membership_auction_bump,
-        payer = creator
-    )]
-    membership_auction: Account<'info, MembershipAuction>,
-    clock: Sysvar<'info, Clock>,
-    system_program: Program<'info, System>,
+/*
+
+#[account]
+#[derive(Default)]
+pub struct MembershipAuctionWinners {
+    record: [MembershipAuctionWinner; 20],
 }
 
-//add check to verify Membership auction time
-#[derive(Accounts)]
-#[instruction(house_authority_bump: u8, epoch: u32)]
-pub struct PlaceBid<'info> {
-    #[account(mut)]
-    bidder: Signer<'info>,
-    #[account(mut)]
-    newest_loser: AccountInfo<'info>,
-    #[account(
-        mut,
-        seeds = [MEMBERSHIP_AUCTION_SEED, &epoch.to_le_bytes()],
-        bump = membership_auction.bump,
-    )]
-    membership_auction: Account<'info, MembershipAuction>,
-    #[account(
-        mut,
-        seeds = [HOUSE_SEED],
-        bump = house_authority_bump
-    )]
-    house_authority: UncheckedAccount<'info>,
-    system_program: Program<'info, System>,
+#[derive(Default, Clone, Copy, AnchorDeserialize, AnchorSerialize)]
+pub struct MembershipAuctionWinner {
+    wallet: Pubkey,
+    has_claimed: bool,
 }
-
 #[derive(Accounts)]
 #[instruction(winners_bump: u8, epoch: u32)]
 pub struct SettleMembershipAuction<'info> {
@@ -254,49 +423,11 @@ pub struct SettleMembershipAuction<'info> {
     membership_auction: Account<'info, MembershipAuction>,
     #[account(
         init,
-        seeds = [WINNERS_SEED, &epoch.to_le_bytes()],
+        seeds = [HAS_CLAIMED_SEED, &epoch.to_le_bytes(), &[membership_auction.index]],
         bump = winners_bump,
         payer = settler
     )]
-    winners: Account<'info, MembershipAuctionWinners>,
+    has_claimed: Account<'info, HasClaimed>,
     system_program: Program<'info, System>,
 }
-
-#[derive(Accounts)]
-pub struct ClaimMembershipFromAuction<'info> {
-    claimant: Signer<'info>,
-    //add address verification
-    #[account(mut)]
-    winners: Account<'info, MembershipAuctionWinners>,
-}
-
-#[account]
-#[derive(Default)]
-pub struct MembershipAuctionWinners {
-    record: [MembershipAuctionWinner; 4],
-}
-
-#[derive(Default, Clone, Copy, AnchorDeserialize, AnchorSerialize)]
-pub struct MembershipAuctionWinner {
-    wallet: Pubkey,
-    has_claimed: bool,
-}
-
-#[account]
-#[derive(Default)]
-pub struct MembershipAuction {
-    epoch: u32,
-    start_timestamp: u64,
-    bids: [Bid; 4],
-    bump: u8,
-}
-
-#[error]
-pub enum ErrorCode {
-    #[msg("bid does not meet minimum for this auction (lowest * 1.02)")]
-    LowBallBid,
-    #[msg("bidding wallet has already placed a bid on this auction")]
-    NonUniqueBidder,
-    #[msg("wallet has no authority to claim. either they didn't win or they already claimed")]
-    NoAuctionClaimAuthority,
-}
+*/
